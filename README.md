@@ -3359,6 +3359,12 @@ In my opinion, the following does not mention or imply the expiry precondition a
 - #653 (Did not mention expiry precondition, no example numerical/coded PoC)
 
 
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/17
+
+
 # Issue M-12: The circulating_supply() of the Minter contract may revert, resulting in the inability of the Minter to periodically emit Flow tokens 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/663 
