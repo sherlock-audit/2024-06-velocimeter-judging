@@ -106,309 +106,7 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/9
 
 
-# Issue H-2: Permissioneless LP Pair Creation allows whales to efficiently farm emissions via single sided deposits paired with malicious tokens 
-
-Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/23 
-
-## Found by 
-GalloDaSballo, crypt0n
-## Summary
-
-The decision to allow Gauges on LP pairs in which just one of the two tokens is benign allows farming emissions with malicious tokens
-
-## Vulnerability Detail
-
-Gauges can be created on any pair as long as one of the two tokens are whitelisted:
-
-https://github.com/sherlock-audit/2024-06-velocimeter/blob/63818925987a5115a80eff4bd12578146a844cfd/v4-contracts/contracts/GaugePlugin.sol#L55-L63
-
-```solidity
-    function checkGaugeCreationAllowance(
-        address caller,
-        address tokenA,
-        address tokenB
-    ) external view returns (bool) {
-        return
-            isWhitelistedForGaugeCreation[tokenA] ||
-            isWhitelistedForGaugeCreation[tokenB];
-    }
-```
-
-As long as someone owns (or can get to 1%) of the total votes, they can simply LP in a single sided fashion by pairing a whitelisted token with a malicious tokens that only allows them to use it.
-
-This will guarantee them that they will farm all emissions for themselves
-
-### Optimal attack
-
-This can be done optimally in the following way:
-
-For each unit of approved token and 1% of voting power:
-
-Chunk into multiple 1% of votes and into unit of approved token, pair it with a token that will revert on transfer if the sender is not the owner and if the recipient is not either the pool or the owner
-
-## Impact
-
-The pair will not be usable by anybody except the owner
-
-They will efficiently farm 100% of the emissions for that pair
-
-## Code Snippet
-
-Note that this attack has already happened on the original solidly:
-https://hackmd.io/@c30/BJ2PNCwgs#5-Perform-51-attack-on-Solidly-v1
-
-## Tool used
-
-Manual Review
-
-## Mitigation
-
-In my opinion:
-- Both tokens need to be approved
-- There should be a delay that allows the owner a sufficient amount of time to blacklist the guage
-- This delay needs to be in place as to prevent this from being done at the last second, making the attack unavoidable
-
-
-
-## Discussion
-
-**nevillehuang**
-
-request poc
-
-Could be invalid,
-
-Sponsor comments:
-> Invalid, still need to have our nft and vote on them to get any emmisions, and it is not different to just creating new token and create pair for it 
-
-**sherlock-admin4**
-
-PoC requested from @GalloDaSballo
-
-Requests remaining: **34**
-
-**GalloDaSballo**
-
-Happy Thursday, thank you for the opportunity to add additional context
-
-Please add this file to your tests
-
-```solidity
-pragma solidity 0.8.13;
-
-import "./BaseTest.sol";
-import "solmate/test/utils/mocks/MockERC20.sol";
-
-interface IDepositableGauge {
-    function deposit(uint amount, uint tokenId) external;
-}
-
-contract MaliciousERC20 is MockERC20 {
-
-    address immutable owner;
-    address pool;
-
-    constructor() MockERC20("You only live once so farm as much as you can", "YOLO", 18){
-        owner = msg.sender;
-    }
-
-
-    function setPool(address _pool) external {
-        require(msg.sender == owner);
-        pool = _pool;
-    }
-
-    
-
-
-    function transfer(address to, uint256 amount) public override returns (bool) {
-        require(to == pool && msg.sender == owner || msg.sender == owner && to == pool, "Must be under control");
-        balanceOf[msg.sender] -= amount;
-
-        // Cannot overflow because the sum of all user
-        // balances can't exceed the max uint256 value.
-        unchecked {
-            balanceOf[to] += amount;
-        }
-
-        emit Transfer(msg.sender, to, amount);
-
-        return true;
-    }
-
-    function transferFrom(
-        address from,
-        address to,
-        uint256 amount
-    ) public override returns (bool) {
-        require(to == pool && msg.sender == owner || msg.sender == owner && to == pool, "Must be under control");
-        uint256 allowed = allowance[from][msg.sender]; // Saves gas for limited approvals.
-
-        if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
-
-        balanceOf[from] -= amount;
-
-        // Cannot overflow because the sum of all user
-        // balances can't exceed the max uint256 value.
-        unchecked {
-            balanceOf[to] += amount;
-        }
-
-        emit Transfer(from, to, amount);
-
-        return true;
-    }
-}
-
-contract GaugePluginTest is BaseTest {
-    VotingEscrow escrow;
-    GaugeFactory gaugeFactory;
-    BribeFactory bribeFactory;
-    Voter voter;
-    event WhitelistedForGaugeCreation(
-        address indexed whitelister,
-        address indexed token
-    );
-    event BlacklistedForGaugeCreation(
-        address indexed blacklister,
-        address indexed token
-    );
-
-    function setUp() public {
-        deployOwners();
-        deployCoins();
-        mintStables();
-        uint256[] memory amounts = new uint256[](3);
-        amounts[0] = 2e25;
-        amounts[1] = 1e25;
-        amounts[2] = 1e25;
-        mintFlow(owners, amounts);
-
-        VeArtProxy artProxy = new VeArtProxy();
-        escrow = new VotingEscrow(address(FLOW), address(flowDaiPair), address(artProxy), owners[0]);
-
-        deployPairFactoryAndRouter();
-        gaugeFactory = new GaugeFactory();
-        bribeFactory = new BribeFactory();
-        gaugePlugin = new GaugePlugin(address(FLOW), address(WETH), owners[0]);
-        voter = new Voter(
-            address(escrow),
-            address(factory),
-            address(gaugeFactory),
-            address(bribeFactory),
-            address(gaugePlugin)
-        );
-
-        escrow.setVoter(address(voter));
-        factory.setVoter(address(voter));
-        deployPairWithOwner(address(owner));
-        deployOptionTokenWithOwner(address(owner), address(gaugeFactory));
-        gaugeFactory.setOFlow(address(oFlow));
-
-        factory.setFee(true, 2); // 2 bps = 0.02%
-        deployPairWithOwner(address(owner));
-        mintPairFraxUsdcWithOwner(payable(address(owner)));
-    }
-
-    // Create a new Pair
-    // One of the tokens must be malicious
-    // forge test --match-test testMaliciousPairFarm -vv
-    function testMaliciousPairFarm() public {
-        vm.startPrank(address(owner2));
-        // WETH is whitelisted
-        // gaugePlugin.whitelistForGaugeCreation(address(WETH)); // already done in setup
-
-        MaliciousERC20 maliciousToken = new MaliciousERC20();
-
-        // Create gauge and pool
-        address newPool = factory.createPair(address(WETH), address(maliciousToken), false);
-        address gauge = voter.createGauge(address(newPool), 0);
-
-        // Setup malicious token and set ability to mint
-        WETH.mint(address(owner2), 1e18);
-        maliciousToken.mint(address(owner2), 1e18);
-        maliciousToken.setPool(address(newPool));
-
-        // Mint LP Position
-        maliciousToken.transfer(newPool, 1e18);
-        WETH.transfer(newPool, 1e18);
-        IPair(newPool).mint(address(owner2));
-        IERC20(newPool).approve(gauge, type(uint256).max);
-        
-        // Stake
-        IDepositableGauge(gauge).deposit(IERC20(newPool).balanceOf(address(owner2)), 0);
-        
-        vm.stopPrank();
-
-        // Have someone else try to LP
-        address victim = address(0x5445);
-        vm.startPrank(victim);
-        WETH.mint(address(victim), 1e18);
-        WETH.transfer(address(newPool), 1e18);
-
-        IPair asPair = IPair(newPool);
-
-        bool isToken0 = address(maliciousToken) == asPair.token0() ? true : false;
-
-        // Try to purchase one token, Malicious token will prevent it
-        /***
-            ├─ [8335] Pair::swap(1, 0, 0x0000000000000000000000000000000000005445, 0x)
-            │   ├─ [4814] PairFactory::isPaused(Pair: [0x43A81261e92C7B789aBaA2ab3eBF5962BE91CDe9]) [staticcall]
-            │   │   └─ ← [Return] false
-            │   ├─ [720] MaliciousERC20::transfer(0x0000000000000000000000000000000000005445, 1)
-            │   │   └─ ← [Revert] revert: Must be under control
-            │   └─ ← [Revert] EvmError: Revert
-         */
-        // Error is not forwarded hence we just catch the revert, use -vvvv to verify my statement
-        vm.expectRevert();
-        IPair(newPool).swap(isToken0 ? 1 : 0, isToken0 ? 0 : 1, victim, hex"");
-
-        vm.stopPrank();
-
-        // We can now vote, knowing that all emissions we vote for can only be received by us
-        // This is the most effective way to farm emission as our votes will never get diluted
-
-        // Just ve.create_lock
-        // Vote on the pool
-        // Nobody else can farm these
-    }
-}
-```
-
-This will allow attackers to vote for pools for which they are the only LP, making voting 100% effective (no dilution)
-
-**dawiddrzala**
-
-you still need to get voting power and locked it to direct emission then it is your choice where you want to direct it, you can vote on main pool and that is going to be most likely more beneficial for you as you get liquid tokens, also we have pause option to stop emissions on the fake gauges 
-
-**nevillehuang**
-
-@GalloDaSballo Do you have any comments for the above? Personally, I don't think it is a valid argument for disputing validity.
-
-**GalloDaSballo**
-
-Thank you for the opportunity to comment
-
-Because of the fact that an attacker can vote at the last second, and that gauge creation requires only a single token being approved, all users will be able to decide whether to comply with the intended usage or to farm scam tokens at the detriment of benign users
-
-Adding a time in which it's no longer possible to vote on new gauges would give sufficient time to block those gauges, whereas now malicioius pairs could be deployed and voted on at the last possible time
-
-I have linked to this being weaponized in the original report, but this also happened on day 1 of solidly in 2022:
-https://x.com/IgMosqueira/status/1499452416986533911
-https://x.com/Ceazor7/status/1498015622059687936
-https://frogsanon.neworder.network/articles/velodrome-finance-the-return-of-ve-33
-
-Giving all users the option to turn malicious whenever the game theory makes it convenient is not a risk the project should take
-
-**dawiddrzala**
-
-our model is completely different, it is more profitable to vote on the main pool and get the liquid token then vote on malice pool and get the option tokens, also to get voting power you need to be lp provider so basically you are dumping on yourself, so compering our project to velodrome is not valid as our model is completely different 
-
-**nevillehuang**
-
-Will leave open for escalation discussion
-
-# Issue H-3: VotingEscrow MAX_DELEGATES value can lead to DOS on certain EVM-compatible chains 
+# Issue H-2: VotingEscrow MAX_DELEGATES value can lead to DOS on certain EVM-compatible chains 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/26 
 
@@ -503,7 +201,7 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/14
 
 
-# Issue H-4: poke() may be dos 
+# Issue H-3: poke() may be dos 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/55 
 
@@ -675,7 +373,13 @@ Here is one example:
 - When we come to the next epoch, Alice's veNFT can be poked. Then the `weights[poolA]` will decrease because veNFT's voting power decrease. However, the `weights[poolB]` will keep the same as the last epoch considering that poke() will be reverted. So `weights[poolB]`'s weight ratio will be larger than 50%, the gaugeB will be distributed more rewards than expected.
  
 
-# Issue H-5: pause or kill gauge can lead to FLOW token stuck in voter 
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/21
+
+
+# Issue H-4: pause or kill gauge can lead to FLOW token stuck in voter 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/107 
 
@@ -813,12 +517,12 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/13
 
 
-# Issue H-6: `OptionTokenV4.exerciseLP`'s `addLiquidity` lack of slippage can be abused to make victims exercise for a lower liquidity than intended 
+# Issue H-5: `OptionTokenV4.exerciseLP`'s `addLiquidity` lack of slippage can be abused to make victims exercise for a lower liquidity than intended 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/199 
 
 ## Found by 
-0xpiken, Avci, Bauchibred, Bauer, GalloDaSballo, MSaptarshi, Minato7namikazi, Sentryx, StraawHaat, ZanyBonzy, almurhasan, bin2chen, bughuntoor, cryptic, cu5t0mPe0, eeshenggoh, eeyore, jennifer37, joshuajee, jovi, pashap9990, pseudoArtist, tvdung94
+0xpiken, Avci, Bauchibred, Bauer, GalloDaSballo, MSaptarshi, Minato7namikazi, Sentryx, StraawHaat, ZanyBonzy, almurhasan, bin2chen, bughuntoor, cryptic, cu5t0mPe0, eeshenggoh, eeyore, jennifer37, joshuajee, pashap9990, pseudoArtist, tvdung94
 ## Summary
 
 `OptionTokenV4.exerciseLP` uses spot reserves and a fixed `_amount` by sandwiching an exercise operation, as well as due to the pool being imbalanced, the depositor can receive less liquidity than intended, burning more OptionTokens for less LP tokens
@@ -991,12 +695,213 @@ Manual Review
 
 Add an additional slippage check for `exerciseLP` to check that `lpAmount` is above a slippage threshold
 
-# Issue H-7: If user merges their `veNFT`, they'll lose part of their rewards 
+
+
+## Discussion
+
+**0xklapouchy**
+
+@nevillehuang
+Hi 0xnevi,
+
+The duplicates in this issue come from three different issues and should be split accordingly. After rechecking, here is how I believe they should be divided:
+
+1. **Main Issue #199**: These duplicates are related to the lack of slippage control for lpTokens received or the use of amountAMin and amountBMin. As the result is the same (the lpTokens are received in the proper proportion), they should be grouped together:
+   - #199
+   - #89
+   - #97
+   - #164
+   - #216
+   - #245
+   - #250
+   - #256
+   - #294
+   - #336
+   - #473
+   - #524
+
+2. **Second Issue**: For example, mine (#291) involves a missing check on the `paymentAmountToAddLiquidity` amount. This issue will still be valid even if the Main issue is fixed, as the `paymentAmountToAddLiquidity` can be manipulated even if the user receives lpTokens in the desired proportions:
+   - #291
+   - #62
+   - #152
+   - #217
+   - #277
+   - #328
+   - #401
+   - #517
+   - #560
+   - #600
+   - #620
+   - #677
+   - #188
+   - #174
+
+3. **Third Issue**: Issues #431 and mine (#295) relate to the absence of a return of unused tokens, even where the transfer flow is user -> OptionTokenV4 contract -> router:
+   - #431
+   - #295
+
+Lastly, #530 is invalid as it pertains to a view function, which is functioning as expected. The same user has issue #517, where this view function is only valid when utilized.
+
+Edit: I missed #524 in first group.
+
+**rickkk137**
+
+@0xklapouchy thx for escalate this issue and I agree with u first group talk about different root cause and I think first group are invalid because they just mention lack of slippage control but main problem happen because of paymentAmountToAddLiquidity and attacker can manipulate that to harm legimate users and slippage control in this case  dosen't matter because second parameter of addLiquidity will be computed in execution time of transaction 
+
+```sollidity
+addLiquidity(
+            _tokenA,
+            _tokenB,
+            _amountA,
+            _amountB,
+            1,
+            1,
+            address(this),
+            block.timestamp
+        );
+```
+handling slippage control is important when user compute _amountB based on reserveA and reserveB before main addliq tx
+but in this case _amountB will be computed base on current reserveA and reserveB because both of them will be called in exercise function @nevillehuang          
+
+ #89 #97 #164 #245 #250 #256 #294 #336 #431 #473 #524
+ also they doesn't have PoC and that is because their attack path is not provable and there isn't any loss of fund for this type of issue
+
+
+**nevillehuang**
+
+@0xklapouchy @goheesheng I really appreciate the second look, especially @0xklapouchy, this is the type of escalation that is very exemplary. 
+
+Agree with the deduplication with the followinh exceptions:
+
+- I Will double check all duplicates to ensure accuracy and quality for issues 1 and 2
+- Issue 3, which I have to take a further look at it
+
+Cc @dawiddrzala, I believe two separate fixes are required for issue 1 and 2, unless I am missing something. Issue 3 is pending validity
+
+**0xklapouchy**
+
+@nevillehuang 
+As for Issue 3, although it may initially seem valid to me, I can't prove it with a coded PoC (the values are used to last wei). Therefore, it can be considered invalid.
+
+**cvetanovv**
+
+All issues related to "slippage" are grouped together, regardless of whether they are different contracts or functions. It's in the Sherlock documentation.
+Therefore, they should remain duplicated together.
+
+
+**nevillehuang**
+
+@cvetanovv I think this suggestion [here](https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/199#issuecomment-2286145206) should be applied excluding issues #431 and #295, which should be invalidated, because of the following exception noted in sherlock [guidelines](https://github.com/sherlock-protocol/sherlock-v2-docs/tree/29a019b8690eb01df3587868c4d7eac1e3459bda/audits/judging/judging#ix-duplication-rules). Different fix is involved despite them falling under the umbrella of slippage issues. However since the word `and` is used, I'm not sure if it should be interpreted as all conditions below must be met or just one? code implementations and fixes are different, but impact is similar. I will leave it to you to decide or if any other watsons have additional inputs
+
+> The exception to this would be if underlying code implementations, impact, and the fixes are different, then they can be treated separately.
+
+
+
+**cvetanovv**
+
+@nevillehuang Because the word is `and` I think it should remain duplicated. 
+
+However, with the latest update, the word is being replaced with `or`.  
+
+If you look at the current documentation, you'll see it's a little different in the duplicate rule - https://docs.sherlock.xyz/audits/judging/judging#ix.-duplication-rules
+
+This update happened on 08/07/2024 - https://docs.sherlock.xyz/audits/judging/judging/criteria-changelog
+
+However, the contest was started on 01/07/2024. That is, we are looking at the old rules where all the issues with "slippage" are grouped together. However, this will most likely be different for the new contests. At least, that's how I understand things.
+
+**0xklapouchy**
+
+@cvetanovv 
+
+To my understanding, even under the old rules, these issues should be considered separately as they involve three different factors:
+
+1. The root cause and impact are different. In one case, an incorrect (undervalued) LP amount is minted, while in the other, an overpayment occurs due to manipulation of the `paymentAmountToAddLiquidity`.
+2. The required fixes are different.
+3. When we examine the logic of both functions, the underlying code is different.
+
+For the first issue, the problem lies within the following code:
+
+```solidity
+        (, , lpAmount) = IRouter(router).addLiquidity(
+            underlyingToken,
+            paymentToken,
+            false,
+            _amount,
+            paymentAmountToAddLiquidity,
+            1,
+            1,
+            address(this),
+            block.timestamp
+        );
+```
+
+For the second issue, the problem lies within this code:
+
+```solidity
+        (uint256 paymentAmount, uint256 paymentAmountToAddLiquidity) = getPaymentTokenAmountForExerciseLp(_amount, _discount);
+```
+
+The only commonality between these issues is the use of the term "slippage." However, they are entirely different from each other. Please refer to my issue #291, where I don't even mention slippage, as the issue there involves price manipulation.
+
+**cvetanovv**
+
+@0xklapouchy I'll consider your comment and ask Sherlock HoJ whether to keep them duplicated or separate them.
+
+**0xklapouchy**
+
+@cvetanovv @WangSecurity 
+
+Reminder that this should be sorted out.
+
+**crypticdefense**
+
+I just saw this right now, and would like to quickly respond to @0xklapouchy's comments about #517 and #530. #517 is clearly a duplicate of the issues in the second group and has a coded PoC which shows loss of funds due to inadequate slippage protection regarding `paymentAmountToAddLiquidity`.
+
+As for #517, the view function is indeed used in `OptionTokenV4::exerciseVe` and `OptionTokenV4::exerciseLp` functions. I will let the lead judge to decide on it, but I also wrote a coded PoC for that issue, which I commented on #174.
+
+Lastly, I'm unsure why @rickkk137 mentioned that #524 "does not have a PoC because that attack path is not proveable", when it clearly has a coded PoC written explaining step-by-step why it's valid, with an impact causing loss of funds. 
+
+I will refrain from further comment and let the judges decide.
+
+cc: @cvetanovv @WangSecurity @nevillehuang 
+
+Edit: I meant to say "As for #530" in the second paragraph, not #517 :)
+
+
+**goheesheng**
+
+Hi @WangSecurity @nevillehuang  for #174 the problem submitted is using a spot price is manipulatable of the pool instead of TWAP and is also not recommended for any protocol to use LP pool spot price as a price feed. The issue of slippage is inherent but the issue can also be fixed using TWAP price which is challenging to manipulate. Slippage can be used to fix this problem, but in the report that this is a spot price manipulability. 
+
+
+**0xklapouchy**
+
+@crypticdefense 
+I missed 524 in first group. Edited my comment.
+
+As for the 530, it is invalid, view function works as expected, should this function be used on-chain - `NO`. 
+Can it be used off-chain - `YES`, for example to get the value for the slippage protection for `addLiquidity()`, you just attach this off-chain read as parameter when exercising.
+
+The difference to 517 is that this view function is utilized on-chain, and only then there is a problem, but not in the view function, but in the function that used it.
+
+**cvetanovv**
+
+After a discussion with @WangSecurity and LSW, we decided to group all slippage protection issues into one issue. 
+The reason is that a fix can be one. The protocol can check that token amounts are within reasonable deviation from the TWAP price.
+
+I explained why these issues would be duplicated together now, but in a future contest in the same situation could be in separate groups, with this comment - https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/199#issuecomment-2294819677
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/27
+
+
+# Issue H-6: If user merges their `veNFT`, they'll lose part of their rewards 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/235 
 
 ## Found by 
-bughuntoor
+Audinarey, bughuntoor, dandan, sonny2k
 ## Summary
 If user merges their `veNFT`, they'll lose part of their rewards
 
@@ -1051,7 +956,7 @@ Do not burn the token
 
 **nevillehuang**
 
-Note, I will make a self escalation to avoid a long drawn out escalation on multiple different issues. For any issues relating to duplicates of this issue, please leave comments here so we can aggregate comments and reconsider validity.
+Note, please consider not making an escalation for the following issues and duplicates as I will make a self escalation to avoid a long drawn out escalation on multiple different issues. For any issues relating to duplicates of this issue, please leave comments here so we can aggregate comments and reconsider validity.
 
 1. Most issues are likely invalid, user error, they can simply claim before withdrawing/merging, similar to this issue highlighted [here](https://github.com/sherlock-audit/2024-06-magicsea-judging/issues/283)
 2. #235 and #236 makes the only valid point that the current week rewards are lost as rewards are lagging by one week, and is the only one that mentions the valid attack path, so I believe it is the only issue that is valid.
@@ -1059,7 +964,75 @@ Note, I will make a self escalation to avoid a long drawn out escalation on mult
 - #170, #367, #606, #682 - Some has good PoCs, but unfortunately, does not identify the attack path mentioned in point 1 above
 - #236 - Valid, but would consider dupe of #235 because it has the same root cause per [sherlock duplication guidelines](https://github.com/sherlock-protocol/sherlock-v2-docs/tree/29a019b8690eb01df3587868c4d7eac1e3459bda/audits/judging/judging#ix-duplication-rules) and mentioned the lagging rewards
 
-# Issue H-8: Exercising a large amount of options gives significantly higher discounts than supposed to. 
+**nevillehuang**
+
+Escalate as per comments above and as discussed [here](https://discord.com/channels/812037309376495636/1257350045976760404/1272478338610499626)
+
+**sherlock-admin3**
+
+> Escalate as per comments above and as discussed [here](https://discord.com/channels/812037309376495636/1257350045976760404/1272478338610499626)
+
+You've created a valid escalation!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**sonny2k**
+
+Pointing out 1 week of lagging rewards seems like it's more of Impact elaboration rather than Attack Path elaboration itself, just more detailed than other issues as other issues simply state unclaimed rewards are lost. I think this impact elaboration is obvious, as long as the rewards are not claimed before calling merge/withdraw, the lost unclaimed rewards will be in the range of [1 week - 51 weeks]. Making this issue not so different from its dups, just more specific on the impact ofc. So if this issue is valid then all of its dups should be also valid IMO. BTW thanks for your hard work @nevillehuang! Your work judging this contest is truly sonorous.
+
+**0xklapouchy**
+
+@nevillehuang
+
+Correct me if I'm wrong, but due to the `rewards lagging by one week`, when using the merge (the current week’s rewards from one tokenId are transferred to another tokenId), the rewards are actually moved to the new tokenId. There is no reward loss for the current week. (rewards can even increase if `to` tokenId has a longer endTime).
+
+Rewards are calculated based on the balanceOf at each `week_cursor`, with no rewards calculations occurring in between. The lock in the VotingEscrow is also based on weeks, so you can’t withdraw() before the entire week has passed.
+
+Therefore, the assumption that `current week rewards are lost` is invalid.
+
+Based on the issue discussed at https://github.com/sherlock-audit/2024-06-magicsea-judging/issues/283, you should either invalidate all issues and classify them as `Low`, or determine that all of them are valid.
+
+**spacegliderrrr**
+
+Statement above is incorrect. When merging, current week’s rewards are not transferred to new token. 
+
+During week N, user can claim rewards up to week `N - 1`, based on their balance at the beginning of week `N - 1`. Rewards for week N will be lost, as the token will be burned, and the new tokenId will receive the amount after the week has started (so the amount will be accounted for from the next week onward)
+
+**nevillehuang**
+
+1. I disagree that the precondition for attack path is not important, because without it, I would have invalidate all issues as user error since without me actually going and find the actual vulnerability path myself, there was no way I would have known that rewards of a lagging week will be lost
+2. Regarding @0xklapouchy claims, I would need more code/example logic to determine if it is correct. From my understanding since the `_burn` was first invoked [here](https://github.com/sherlock-audit/2024-06-velocimeter/blob/main/v4-contracts/contracts/VotingEscrow.sol#L1208), the rewards will be lost .
+
+**cvetanovv**
+
+I agree with @sonny2k comment. All duplicates have stated a root cause, and it is that rewards are lost when merging and withdrawing. 
+
+They have also pointed out the impact: reward will be lost.
+
+Because the escalation is from Lead Judge for discussion purposes and this issue will remain valid, I plan to reject the escalation but duplicate #170, #367, #606, and #682 with this issue.
+
+**WangSecurity**
+
+Result:
+High
+Has duplicates
+
+**sherlock-admin4**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [nevillehuang](https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/235/#issuecomment-2283436094): rejected
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/24
+
+
+# Issue H-7: Exercising a large amount of options gives significantly higher discounts than supposed to. 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/238 
 
@@ -1111,7 +1084,17 @@ Manual Review
 ## Recommendation
 Do not use `amountsOut` as a way to price the options
 
-# Issue H-9: voters cannot disable max lock 
+
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/22
+
+
+# Issue H-8: voters cannot disable max lock 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/257 
 
@@ -1249,7 +1232,7 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/12
 
 
-# Issue H-10: `ve_supply` is updated incorrectly 
+# Issue H-9: `ve_supply` is updated incorrectly 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/495 
 
@@ -1356,366 +1339,7 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/11
 
 
-# Issue M-1: Emission Math can be abused by using Wrappers to farm the same LP Pair 
-
-Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/24 
-
-## Found by 
-GalloDaSballo
-## Summary
-
-Permissioneless Gauge creation with whitelisted pairs incentivizes wrapping of one of the two tokens to duplicate the same pool while receiving an outsized, unintended, proportion of emissions
-
-
-## Vulnerability Detail
-
-Emissions are distributed as a percentage of the `total emissions` over the `voting power`
-
-For very popular pairs, voting will help gain a higher percentage, but it will not increase the absolute amount of tokens emitted.
-
-In order for bigger pairs to increase emissions and receive a high amount of tokens, wrappers could be used
-
-An LP position for said pool would look as follows:
-- The trusted token
-- A Wrapper token
-
-By doing this, LPrs will on average receive more emissions than if they simply raise their votes and their stake in the same LP Pool
-
-This creates a negative incentive that:
-- Will cause liquidity to be fragmented
-- Causes wrapping of tokens as a necessary aspect to have certain pool receive a higher amount of emissions
-
-## Impact
-
-By using wrappers the most popular pairs could monopolize the system by being responsible for creating and receiving the vast majority of all emissions
-
-## Code Snippet
-
-Imagine having USDC and WETH, both being whitelisted, and this pair would be expected to be one of the most voted pairs
-
-https://github.com/sherlock-audit/2024-06-velocimeter/blob/63818925987a5115a80eff4bd12578146a844cfd/v4-contracts/contracts/GaugePlugin.sol#L55-L63
-
-```solidity
-    function checkGaugeCreationAllowance(
-        address caller,
-        address tokenA,
-        address tokenB
-    ) external view returns (bool) {
-        return
-            isWhitelistedForGaugeCreation[tokenA] ||
-            isWhitelistedForGaugeCreation[tokenB];
-    }
-```
-
-By wrapping USDC into wrappers we can farm more emissions
-
-Openzeppelin offers a convenient [Wrapepr Contract](https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/extensions/ERC20Wrapper.sol)
-
-By creating a factory for wrappers we could quickly find all pairs that are adopting this strategy
-
-Similarly, the factory could be setup to delegate voting fairly to all wrappers as a means to ensure that everyone benefits from the emissions in the same way
-
-This would end up giving a vast majority of emissions LPs from the main pair, and breaks the emissions logic which was meant to incentivize different pairs
-
-## Tool used
-
-Manual Review
-
-## Recommendation
-
-I don't believe a single sided whitelist to be safe
-I think it fundamentally can always be gamed as shown above
-
-
-
-## Discussion
-
-**nevillehuang**
-
-request poc
-
-Seems like duplicate of #23, how isit different?
-
-Sponsor comments:
-> Invalid, still need to have our nft and vote on them to get any emmisions, and it is not different to just creating new token and create pair for it 
-
-**sherlock-admin4**
-
-PoC requested from @GalloDaSballo
-
-Requests remaining: **22**
-
-**GalloDaSballo**
-
-Happy Thursday!
-
-This POC shows how wrappers can be setup, it also simulates having an aggregator route a swap (easily done via multicall)
-
-This will allow a majority of voters to just vote on wrapped pools as a means to game the system and gain more emissions on those pools
-
-
-You can add this file to your tests
-```solidity
-pragma solidity 0.8.13;
-
-import "./BaseTest.sol";
-import "solmate/test/utils/mocks/MockERC20.sol";
-
-
-contract Wrapper is MockERC20 {
-    address immutable underlying;
-    constructor(address _underlying) MockERC20("Wrapper", "WRAP", 18){
-        underlying = _underlying;
-    }
-
-    function mint(address to, uint256 value) public override {
-        _mint(to, value);
-
-        // Get the underlying
-        MockERC20(underlying).transferFrom(msg.sender, address(this), value);
-    }
-
-    function redeem(address to, uint256 value) public {
-        _burn(msg.sender, value);
-
-        // Send the underlying
-        MockERC20(underlying).transfer(to, value);
-    }
-
-    function burn(address to, uint256 value) public override {
-        revert("removed");
-    }
-}
-
-contract WrapperFactory {
-    mapping(address => address[]) public underlyingToWrappers;
-
-
-    function newWrapper(address underlying) external returns (address) {
-        address newWrapper = address(new Wrapper(underlying));
-
-        underlyingToWrappers[underlying].push(newWrapper);
-
-        return newWrapper;
-    }
-}
-interface IDepositableGauge {
-    function deposit(uint amount, uint tokenId) external;
-}
-
-contract MaliciousERC20 is MockERC20 {
-
-    address immutable owner;
-    address pool;
-
-    constructor() MockERC20("You only live once so farm as much as you can", "YOLO", 18){
-        owner = msg.sender;
-    }
-
-
-    function setPool(address _pool) external {
-        require(msg.sender == owner);
-        pool = _pool;
-    }
-
-    
-
-
-    function transfer(address to, uint256 amount) public override returns (bool) {
-        require(to == pool && msg.sender == owner || msg.sender == owner && to == pool, "Must be under control");
-        balanceOf[msg.sender] -= amount;
-
-        // Cannot overflow because the sum of all user
-        // balances can't exceed the max uint256 value.
-        unchecked {
-            balanceOf[to] += amount;
-        }
-
-        emit Transfer(msg.sender, to, amount);
-
-        return true;
-    }
-
-    function transferFrom(
-        address from,
-        address to,
-        uint256 amount
-    ) public override returns (bool) {
-        require(to == pool && msg.sender == owner || msg.sender == owner && to == pool, "Must be under control");
-        uint256 allowed = allowance[from][msg.sender]; // Saves gas for limited approvals.
-
-        if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
-
-        balanceOf[from] -= amount;
-
-        // Cannot overflow because the sum of all user
-        // balances can't exceed the max uint256 value.
-        unchecked {
-            balanceOf[to] += amount;
-        }
-
-        emit Transfer(from, to, amount);
-
-        return true;
-    }
-}
-
-contract GaugeFarm is BaseTest {
-    VotingEscrow escrow;
-    GaugeFactory gaugeFactory;
-    BribeFactory bribeFactory;
-    Voter voter;
-    event WhitelistedForGaugeCreation(
-        address indexed whitelister,
-        address indexed token
-    );
-    event BlacklistedForGaugeCreation(
-        address indexed blacklister,
-        address indexed token
-    );
-
-    function setUp() public {
-        deployOwners();
-        deployCoins();
-        mintStables();
-        uint256[] memory amounts = new uint256[](3);
-        amounts[0] = 2e25;
-        amounts[1] = 1e25;
-        amounts[2] = 1e25;
-        mintFlow(owners, amounts);
-
-        VeArtProxy artProxy = new VeArtProxy();
-        escrow = new VotingEscrow(address(FLOW), address(flowDaiPair), address(artProxy), owners[0]);
-
-        deployPairFactoryAndRouter();
-        gaugeFactory = new GaugeFactory();
-        bribeFactory = new BribeFactory();
-        gaugePlugin = new GaugePlugin(address(FLOW), address(WETH), owners[0]);
-        voter = new Voter(
-            address(escrow),
-            address(factory),
-            address(gaugeFactory),
-            address(bribeFactory),
-            address(gaugePlugin)
-        );
-
-        escrow.setVoter(address(voter));
-        factory.setVoter(address(voter));
-        deployPairWithOwner(address(owner));
-        deployOptionTokenWithOwner(address(owner), address(gaugeFactory));
-        gaugeFactory.setOFlow(address(oFlow));
-
-        factory.setFee(true, 2); // 2 bps = 0.02%
-        deployPairWithOwner(address(owner));
-        mintPairFraxUsdcWithOwner(payable(address(owner)));
-    }
-
-    // Create wrappers to effectively farm the same pair
-    // forge test --match-test testFarmGaugesWithWrappers -vv
-    function testFarmGaugesWithWrappers() public {
-        vm.startPrank(address(owner2));
-        // WETH is whitelisted
-        // gaugePlugin.whitelistForGaugeCreation(address(WETH)); // already done in setup
-
-        WrapperFactory wrapperFactory = new WrapperFactory();
-        Wrapper wrapperOne = Wrapper(wrapperFactory.newWrapper(address(USDC)));
-        Wrapper wrapperTwo = Wrapper(wrapperFactory.newWrapper(address(USDC)));
-        Wrapper wrapperThree = Wrapper(wrapperFactory.newWrapper(address(USDC)));
-
-
-        // Create gauge and pool
-        address newPoolOne = factory.createPair(address(WETH), address(wrapperOne), false);
-        address newPoolTwo = factory.createPair(address(WETH), address(wrapperTwo), false);
-        address newPoolThree = factory.createPair(address(WETH), address(wrapperThree), false);
-
-        address gaugeOne = voter.createGauge(address(newPoolOne), 0);
-        address gaugeTwo = voter.createGauge(address(newPoolTwo), 0);
-        address gaugeThree = voter.createGauge(address(newPoolThree), 0);
-
-
-        WETH.mint(address(owner2), 3e18);
-        USDC.mint(address(owner2), 3e18);
-        USDC.approve(address(wrapperOne), 1e18);
-        USDC.approve(address(wrapperTwo), 1e18);
-        USDC.approve(address(wrapperThree), 1e18);
-
-        wrapperOne.mint(address(owner2), 1e18);
-        wrapperTwo.mint(address(owner2), 1e18);
-        wrapperThree.mint(address(owner2), 1e18);
-
-       // Let's LP in Two Pools
-        WETH.transfer(address(newPoolOne), 1e18);
-        WETH.transfer(address(newPoolTwo), 1e18);
-        WETH.transfer(address(newPoolThree), 1e18);
-
-        wrapperOne.transfer(address(newPoolOne), 3200e6);
-        wrapperTwo.transfer(address(newPoolTwo), 3200e6);
-        wrapperThree.transfer(address(newPoolThree), 3200e6);
-
-        
-        
-        
-
-        // Mint and farm emissions
-        IPair(newPoolOne).mint(address(owner2));
-        IERC20(newPoolOne).approve(gaugeOne, type(uint256).max);
-        IDepositableGauge(gaugeOne).deposit(IERC20(newPoolOne).balanceOf(address(owner2)), 0);
-
-        IPair(newPoolTwo).mint(address(owner2));
-        IERC20(newPoolTwo).approve(gaugeTwo, type(uint256).max);
-        IDepositableGauge(gaugeTwo).deposit(IERC20(newPoolTwo).balanceOf(address(owner2)), 0);
-
-        IPair(newPoolThree).mint(address(owner2));
-        IERC20(newPoolThree).approve(gaugeThree, type(uint256).max);
-        IDepositableGauge(gaugeThree).deposit(IERC20(newPoolThree).balanceOf(address(owner2)), 0);
-        vm.stopPrank();
-
-        // Aggregators can now quote from all the three pools
-        // And will multi-call
-        // Pair.swap
-        // Wrapper.unwrap
-
-        address aggregator = address(0x11111);
-        address recipient = address(0x123456789);
-        WETH.mint(aggregator, 1e18);
-        vm.startPrank(aggregator);
-        WETH.transfer(newPoolOne, 1e18);
-
-
-        bool isToken0 = address(WETH) == IPair(newPoolOne).token0() ? false : true;
-        IPair(newPoolOne).swap(isToken0 ? 200e6 : 0, isToken0 ? 0 : 200e6, address(aggregator), hex"");
-        wrapperOne.redeem(address(recipient), wrapperOne.balanceOf(aggregator));
-
-        // Majority users would then Lock their tokens
-        // Vote on the wrappers in a proportional way
-        // And farm emissions on wrappers, rather than on new tokens
-    }
-}
-
-```
-
-To run it use:
-```
-forge test --match-test testFarmGaugesWithWrappers -vv
-```
-
-**nevillehuang**
-
-@GalloDaSballo I think the underlying root cause of allowing one-sided permisionless creation of gauges is the same, fixing that would likely fix this issue too. So I would say this is likely a duplicate of #23
-
-**GalloDaSballo**
-
-#23 would be fixed by requiring that both tokens are allowed
-
-This finding wouldxn't necessarily be fixed in that way as it would still be possible to create new gauges from other factories, meaning that a high liquidity pair could purposefully have it's liquidity fragmented to farm more emissions
-
-This finding would require enabling each gauge manually as to ensure that no pair has access, either directly or indirectly to more than one active gauge, as otherwise we could always create `2 * Implementation` gauges for the same pair, that can still be voted on
-
-**nevillehuang**
-
-Will leave open for escalation discussion
-
-# Issue M-2: First liquidity provider of a newly created stable pair can cause DOS and loss of funds 
+# Issue M-1: First liquidity provider of a newly created stable pair can cause DOS and loss of funds 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/27 
 
@@ -1906,7 +1530,17 @@ By adding a similar variable to `MINIMUM_LIQUIDITY` such as `MINIMUM_K` and ensu
         }
 ```
 
-# Issue M-3: swap may be reverted if the input amount is not large enough, especially for low decimal tokens 
+
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/25
+
+
+# Issue M-2: swap may be reverted if the input amount is not large enough, especially for low decimal tokens 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/52 
 
@@ -1990,7 +1624,17 @@ Manual Review
 ## Recommendation
 If the calculated fee is 0, do not need to send fees to the `externalBribe`
 
-# Issue M-4: `update_period(..)` leads to wrong calculation in weekly emissions breaking accounting for the protocol 
+
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/26
+
+
+# Issue M-3: `update_period(..)` leads to wrong calculation in weekly emissions breaking accounting for the protocol 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/168 
 
@@ -2097,7 +1741,7 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/16
 
 
-# Issue M-5: Voting power does not decay when calculating shares of flow emissions if the user does not vote again. 
+# Issue M-4: Voting power does not decay when calculating shares of flow emissions if the user does not vote again. 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/171 
 
@@ -2694,7 +2338,41 @@ For all other gauges the reward is claimed directly on the gauge by calling [`Ga
 
 So, you are correct that oFlow will be minted in the gauge, but the amount minted is equal to the amount of flow received from the Voter contract. 
 
-# Issue M-6: User can make their `veNFT` unpokeable by voting for a to-be-killed gauge 
+**0xklapouchy**
+
+@nevillehuang 
+
+Invalid issue.
+
+It is mitigated by the `poke()` function. (It should be permissionless, but even if controlled by an admin, this is a way to decay voting power.)
+
+Only valid issues are those indicating how the `poke()` function can be DoSed. Therefore, #55, #208, and its duplicates.
+
+**Audinarey**
+
+
+
+
+> @nevillehuang
+> 
+> Invalid issue.
+> 
+> It is mitigated by the `poke()` function. (It should be permissionless, but even if controlled by an admin, this is a way to decay voting power.)
+> 
+> Only valid issues are those indicating how the `poke()` function can be DoSed. Therefore, #55, #208, and its duplicates.
+
+@0xklapouchy I think you have made this comment on the wrong issue.
+
+Please crosscheck
+
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/21
+
+
+# Issue M-5: User can make their `veNFT` unpokeable by voting for a to-be-killed gauge 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/208 
 
@@ -2729,7 +2407,17 @@ Manual Review
 ## Recommendation
 If gauge is killed, instead of reverting, `continue`
 
-# Issue M-7: Rewards supplied to a gauge, prior to its first depositor will be permanently lost. 
+
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/21
+
+
+# Issue M-6: Rewards supplied to a gauge, prior to its first depositor will be permanently lost. 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/243 
 
@@ -2781,65 +2469,94 @@ Revert in case current supply is 0.
 
 @dawiddrzala Could you assist in verifying if this issue is valid? I initially thought it was invalid because it is unrealistic to deposit rewards when there is no depositors. However, given distribute is permissionless, could this be an issue?
 
-# Issue M-8: Gauge's reward rate and period duration can be griefed 
+**sherlock-admin2**
 
-Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/259 
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/23
+
+
+**Audinarey**
+
+@WangSecurity 
+
+> This impact alone I believe is low severity, I don't see it as a "loss of funds" or a "loss of yield". 
+
+> ...As I've said it's not a loss of funds because no one should get those rewards, including the protocol.
+
+you mentioned [here](https://github.com/sherlock-audit/2024-07-kwenta-staking-contracts-judging/issues/83#issuecomment-2286786430) about a week ago that this is a low. How come this is a medium in this case as the scenario is about the same?
+
+cc: @nevillehuang 
+@cvetanovv 
+
+**spacegliderrrr**
+
+There is loss of funds - tokens are stuck and no once can retrieve them. The tokens hold monetary value, therefore this is loss of funds. 
+
+Given that distribution happens both automatically and in a permissionless way, the likelihood of the vulnerability scales exponentially. Issue should remain as is.
+
+**WangSecurity**
+
+I agree with @spacegliderrrr here. The reward distribution on Velocimeter is automatic, while on Kwenta it required an admin to send the rewards.
+
+Additionally, on the issue you mentioned, the problem was that the owner would send rewards before anyone stakes, which is admin mistake and we should assume it wouldn't happen. I didn't mention it initially because I understood it a bit later when the discussion on Kwenta stopped. Also, the issue required for all the stakers to withdraw from the contract. Here, the distribution is automatic and doesn't require any mistakes.
+
+Also, for a detailed answer on Kwenta, look at the discussion under issue 94 where Watsons explained why in the context of Kwenta it was even better to keep these funds in the contract.
+
+Hence, I agree it should remain as it is in the context of Velocimeter.
+
+# Issue M-7: Incorrect calculation of TWAP in `OptionTokenV4.getTimeWeightedAveragePrice()` function. 
+
+Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/298 
 
 ## Found by 
-1nc0gn170, 4gontuk, AMOW, Audinarey, KupiaSec, Matin, Minato7namikazi, Ruhum, Sentryx, StraawHaat, bughuntoor, jennifer37, jovi
+eeyore
 ## Summary
-Anybody can send reward tokens to a gauge via `notifyRewardAmount()` when there're little rewards left or when the current period finish has ended and extend the reward period by another week and dilute the reward rate.
+
+The average price returned by `OptionTokenV4.getTimeWeightedAveragePrice()` can be up to 30 minutes outdated and does not reflect the current Token price.
+
 ## Vulnerability Detail
-https://github.com/sherlock-audit/2024-06-velocimeter/blob/main/v4-contracts/contracts/GaugeV4.sol#L563-L599
-```solidity
-    function notifyRewardAmount(address token, uint amount) external lock {
-        require(token != stake);
-        require(amount > 0);
-        if (!isReward[token]) {
-            require(IVoter(voter).isWhitelisted(token), "rewards tokens must be whitelisted");
-            require(rewards.length < MAX_REWARD_TOKENS, "too many rewards tokens");
-        }
-        if (rewardRate[token] == 0) _writeRewardPerTokenCheckpoint(token, 0, block.timestamp);
-        (rewardPerTokenStored[token], lastUpdateTime[token]) = _updateRewardPerToken(token, type(uint).max, true);
 
-        if (block.timestamp >= periodFinish[token]) {
-            uint256 balanceBefore = IERC20(token).balanceOf(address(this));
-            _safeTransferFrom(token, msg.sender, address(this), amount);
-            uint256 balanceAfter = IERC20(token).balanceOf(address(this));
-            amount = balanceAfter - balanceBefore;
-            rewardRate[token] = amount / DURATION;
-        } else {
-            uint _remaining = periodFinish[token] - block.timestamp;
-            uint _left = _remaining * rewardRate[token];
-            require(amount > _left); 
-            uint256 balanceBefore = IERC20(token).balanceOf(address(this));
-            _safeTransferFrom(token, msg.sender, address(this), amount);
-            uint256 balanceAfter = IERC20(token).balanceOf(address(this));
-            amount = balanceAfter - balanceBefore;
-            rewardRate[token] = (amount + _left) / DURATION;
-        }
-        require(rewardRate[token] > 0);
-        uint balance = IERC20(token).balanceOf(address(this));
-        require(rewardRate[token] <= balance / DURATION, "Provided reward too high");
-        periodFinish[token] = block.timestamp + DURATION;
-        if (!isReward[token]) {
-            isReward[token] = true;
-            rewards.push(token);
-        }
+In the `getTimeWeightedAveragePrice()` function, the average price is calculated using the last `X` known price observations from the `Pair` contract. However, this approach has a flaw because it does not consider the current price, which could be as much as 30 minutes old.
 
-        emit NotifyReward(msg.sender, token, amount);
-    }
-```
+Consider a scenario where the price of the Token significantly increases during this 30-minute window. The resulting maximum discount might not adequately cover the percentage increase in price. This could lead to the protocol failing to collect proper fees when exercising the Tokens.
 
-Whether the current period has finished or not, anybody can deposit rewards to a gauge and dilute the reward rate and extend the period finish time.
 ## Impact
-Diluted reward rate for current stakers in the gauge. Also extended waiting times for current period to finish. 
+
+The use of an outdated TWAP price could result in losses for the protocol or users.
+
 ## Code Snippet
-https://github.com/sherlock-audit/2024-06-velocimeter/blob/main/v4-contracts/contracts/GaugeV4.sol#L563-L599
+
+https://github.com/sherlock-audit/2024-06-velocimeter/blob/main/v4-contracts/contracts/OptionTokenV4.sol#L372-L388
+https://github.com/sherlock-audit/2024-06-velocimeter/blob/main/v4-contracts/contracts/Pair.sol#L222-L246
+
 ## Tool used
+
 Manual Review
+
 ## Recommendation
-Consider implementing validation to ensure that this function is callable by anyone only if the previous reward period has already expired. Otherwise, when there is an active reward period, it may only be called by the designated reward distributor account.
+
+To address this issue, incorporating also the current price retrieved from `Pair.current()` function:
+
+```diff
+function getTimeWeightedAveragePrice(uint256 _amount) public view returns (uint256) {
+    uint256[] memory amtsOut = IPair(pair).prices(
+        underlyingToken,
+        _amount,
+        twapPoints
+    );
+    uint256 len = amtsOut.length;
+    uint256 summedAmount;
+
+    for (uint256 i = 0; i < len; i++) {
+        summedAmount += amtsOut[i];
+    }
+
++    summedAmount += IPair(pair).current(underlyingToken, _amount);
+
+-    return summedAmount / twapPoints;
++    return (summedAmount / twapPoints) + 1;
+}
+```
 
 
 
@@ -2847,39 +2564,92 @@ Consider implementing validation to ensure that this function is callable by any
 
 **nevillehuang**
 
-request poc
+Invalid, user can simply call `sync()` in pair contract to update the latest prices before exercising options
 
-Could be invalid, no loss of funds since the rewards are simply delayed and can be retrieve in subsequent epochs. Normally this kind of synthethix style reward staking have notification of rewards permissioned
+**0xklapouchy**
 
+Escalate.
+
+sync() will not work, price can be outdated up to 30 min:
+
+```solidity
+File: Pair.sol
+171:         timeElapsed = blockTimestamp - _point.timestamp; // compare the last observation with current timestamp, if greater than 30 minutes, record a new event
+172:         if (timeElapsed > periodSize) {
+173:             observations.push(Observation(blockTimestamp, reserve0CumulativeLast, reserve1CumulativeLast));
+174:         }
+```
+
+Observation point will only be added when `timeElapsed > periodSize` and `periodSize == 1800` (30min)
 
 **sherlock-admin3**
 
-PoC requested from @Sentryx
+> Escalate.
+> 
+> sync() will not work, price can be outdated up to 30 min:
+> 
+> ```solidity
+> File: Pair.sol
+> 171:         timeElapsed = blockTimestamp - _point.timestamp; // compare the last observation with current timestamp, if greater than 30 minutes, record a new event
+> 172:         if (timeElapsed > periodSize) {
+> 173:             observations.push(Observation(blockTimestamp, reserve0CumulativeLast, reserve1CumulativeLast));
+> 174:         }
+> ```
+> 
+> Observation point will only be added when `timeElapsed > periodSize` and `periodSize == 1800` (30min)
 
-Requests remaining: **32**
+You've created a valid escalation!
 
-**flackoon**
+To remove the escalation from consideration: Delete your comment.
 
-Hey @nevillehuang,
-We are currently unable to provide a PoC due to being engaged in another audit. Apart from 12 other watsons pointing out the same issue, we can provide a [link](https://github.com/code-423n4/2022-05-velodrome-findings/issues/172) to the same finding from another audit. The issue is widely recognized so we won't get into explanatory mode 😅 We believe it's a valid medium, but we are currently not able to further defend it. If any other watson is willing to escalate or step in, it'd be much appreciated.
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
 
 **nevillehuang**
 
-Will keep medium since it can cause loss of yield by delaying rewards for more than a week, so it is effectively DoS meeting sherlocks guidelines
+Hi @spacegliderrrr @dawiddrzala I recall us discussing a similar/or this issue that resulted in me invalidating the issue but I can't seem to find where, could you double check this issue? I think it was related to issue #354 
 
-**dawiddrzala**
+**spacegliderrrr**
 
-not valid you need to provide at least the same amount of rewards that is currently left to distribut in the gauge  require(amount > _left);  which make it not possible to ddos 
+@nevillehuang that’s a different issue. This issue basically means that instead of getting TWAP of the last 2 hours, it may get it up to 30min delayed (getting the TWAP of 2h30m ago to 30m ago). 
+
+I believe this should be a valid solo Medium
 
 **nevillehuang**
 
-@dawiddrzala I believe this issue is valid, because `notifyRewardAmount ` is permisionless, and is not only able to be called via the `Voter.sol`. Your above comment is correct if the `notifyRewardAmount ` would have been gated to only be able to be called by the `Voter.distribute()`.
+@spacegliderrrr Got it thanks seems valid for now, I will double check again and come to a more definite conclusion
+
+**cvetanovv**
+
+I agree with the escalation and think it can be a valid Medium.
+
+Watson has shown how the `getTimeWeightedAveragePrice()` function calculates an outdated price up to 30 minutes. An outdated TWAP could result in losses for the protocol or its users because the calculated price may not reflect the current market conditions.
+
+Planning to accept the escalation and make this issue a Medium severity.
 
 **dawiddrzala**
 
-this comment is applicable to notify by anybody as well, making the ddos atack not possible as you need to increase the total rewards given to the users, it is part of the gauge code it is not relevant to the voter 
+good point we are going to add the current price to the twap price 
 
-# Issue M-9: `Voter.replaceFactory()` and `Voter.addFactory()` functions are broken. 
+**WangSecurity**
+
+Result:
+Medium 
+Unique
+
+**sherlock-admin2**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [0xklapouchy](https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/298/#issuecomment-2287237474): accepted
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Velocimeter/v4-contracts/pull/22
+
+
+# Issue M-8: `Voter.replaceFactory()` and `Voter.addFactory()` functions are broken. 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/301 
 
@@ -2925,447 +2695,17 @@ Manual Review
 +        require(!isGaugeFactory[_gaugeFactory], 'g.fact true');
 ```
 
-# Issue M-10: pause or killed gauges doesn't decrement the activeGaugeNumber causing more rewards emitted 
-
-Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/384 
-
-## Found by 
-Ch\_301, GalloDaSballo, cryptic, eeshenggoh
-## Summary
-Many Solidly forks have the ability to pause the system in case of suspicious activity. V4 enhances this by allowing the pausing of trading on a single pool. This improves security and enables VMCoupons to maintain a consistent exercise price for all holders. Additionally, it supports scenarios where a pool's price needs to be maintained for a period of time. Even when trading is paused, LP providers can still freely enter and exit their positions.
-
-However, the problem lies in updating the total amount of gauges.
-
-## Vulnerability Detail
-
-In V4, emissions are determined by the number of gauges. More gauges result in more emissions being emitted. 
-
-`Voter::distribute` function can be called by anyone and it updates accounting for gauges. It is called weekly by keeper bot. When the gauge is paused by the council, the total `activeGaugeNumber` remains as is. The `Voter::distribute` function calls the `IMinter(minter).update_period();`, this can only be updated once due to the if statement. There is the same problem in `Voter::killGaugeTotally`. Hence, for that week, more rewards will be emitted since the `activeGaugeNumber` remains the same.
-
-```solidity
-// Voter.sol
-    function distribute(address _gauge) public lock {
-        IMinter(minter).update_period(); //@audit
-    -- SNIP --
-```
-```solidity
-// Minter.sol
-    function update_period() external returns (uint) {
-        uint _period = active_period;
-        if (block.timestamp >= _period + WEEK && initializer == address(0)) { // only trigger if new week
-            _period = (block.timestamp / WEEK) * WEEK;
-            active_period = _period;
-            uint256 weekly = weekly_emission();
-            uint _teamEmissions = (teamRate * weekly) /
-                (PRECISION - teamRate);
-            uint _required =  weekly + _teamEmissions;
-            uint _balanceOf = _flow.balanceOf(address(this));
-            if (_balanceOf < _required) {
-                _flow.mint(address(this), _required - _balanceOf);
-            }
-            require(_flow.transfer(teamEmissions, _teamEmissions));
-            _checkpointRewardsDistributors();
-            _flow.approve(address(_voter), weekly);
-            _voter.notifyRewardAmount(weekly);
-            emit Mint(msg.sender, weekly, circulating_supply());
-        }
-        return _period;
-    }
-
-    function weekly_emission() public view returns (uint) {
-        uint256 numberOfGauges = _voter.activeGaugeNumber(); // should decrease however it was not
-        if(numberOfGauges == 0) { 
-            return weeklyPerGauge;
-        }
-        return weeklyPerGauge * numberOfGauges;
-    }
-```
-
-<details><summary> Run: forge test --match-test testPoCDistribute_reset_to1 -vv </summary>
-<p>
-
-```solidity
-// 1:1 with Hardhat test
-pragma solidity 0.8.13;
-import './BaseTest.sol';
-import '../contracts/GaugeV4.sol';
-contract PoCTest is BaseTest {
-    VotingEscrow escrow;
-    GaugeFactory gaugeFactory;
-    BribeFactory bribeFactory;
-    Voter voter;
-    RewardsDistributor distributor;
-    Minter minter;
-    function deployBase() public {
-        vm.warp(block.timestamp + 1 weeks); // put some initial time in
-        deployOwners();
-        deployCoins();
-        mintStables();
-        uint256[] memory amounts = new uint256[](1);
-        amounts[0] = 1e25;
-        mintFlow(owners, amounts);
-        VeArtProxy artProxy = new VeArtProxy();
-        deployPairFactoryAndRouter();
-        deployMainPairWithOwner(address(owner));
-        escrow = new VotingEscrow(address(FLOW), address(flowDaiPair),address(artProxy), owners[0]);
-        gaugeFactory = new GaugeFactory();
-        bribeFactory = new BribeFactory();
-        gaugePlugin = new GaugePlugin(address(FLOW), address(WETH), owners[0]);
-        voter = new Voter(address(escrow), address(factory), address(gaugeFactory), address(bribeFactory), address(gaugePlugin));
-        factory.setVoter(address(voter));
-        flowDaiPair.setVoter();
-        deployPairWithOwner(address(owner));
-        deployOptionTokenWithOwner(address(owner), address(gaugeFactory));
-        gaugeFactory.setOFlow(address(oFlow));
-        address[] memory tokens = new address[](2);
-        tokens[0] = address(FRAX);
-        tokens[1] = address(FLOW);
-        flowDaiPair.approve(address(escrow), TOKEN_1);
-        escrow.create_lock(TOKEN_1, FIFTY_TWO_WEEKS);
-        distributor = new RewardsDistributor(address(escrow));
-        escrow.setVoter(address(voter));
-        minter = new Minter(address(voter), address(escrow), address(distributor));
-        voter.initialize(tokens, address(minter));
-        distributor.setDepositor(address(minter));
-        FLOW.setMinter(address(minter));
-        FLOW.approve(address(router), TOKEN_1);
-        FRAX.approve(address(router), TOKEN_1);
-        router.addLiquidity(address(FRAX), address(FLOW), false, TOKEN_1, TOKEN_1, 0, 0, address(owner), block.timestamp);
-        address pair = router.pairFor(address(FRAX), address(FLOW), false);
-        FLOW.approve(address(voter), 5 * TOKEN_100K);
-        address old_gauge = voter.createGauge(pair, 0);
-        vm.roll(block.number + 1); // fwd 1 block because escrow.balanceOfNFT() returns 0 in same block
-        assertGt(escrow.balanceOfNFT(1), 995063075414519385);
-        assertEq(flowDaiPair.balanceOf(address(escrow)), TOKEN_1);
-        address[] memory pools = new address[](1);
-        pools[0] = pair;
-        uint256[] memory weights = new uint256[](1);
-        weights[0] = 5000;
-        voter.vote(1, pools, weights);
-    }
-
-    function initializeVotingEscrow() public {
-        deployBase();
-
-        Minter.Claim[] memory claims = new Minter.Claim[](1);
-        claims[0] = Minter.Claim({
-            claimant: address(owner),
-            amount: TOKEN_100K,
-            lockTime: FIFTY_TWO_WEEKS
-        });
-        //minter.initialMintAndLock(claims, 2 * TOKEN_100K);
-        FLOW.transfer(address(minter), TOKEN_100K);
-        flowDaiPair.approve(address(escrow), TOKEN_1);
-        escrow.create_lock(TOKEN_1,FIFTY_TWO_WEEKS);
-        minter.startActivePeriod();
-
-        assertEq(escrow.ownerOf(2), address(owner));
-        assertEq(escrow.ownerOf(3), address(0));
-        vm.roll(block.number + 1);
-        assertEq(FLOW.balanceOf(address(minter)), 1 * TOKEN_100K);
-    }
-    function testPoCPause_weeklyEmission() public {
-        initializeVotingEscrow();
-
-        FLOW.approve(address(router), TOKEN_1);
-        FRAX.approve(address(router), TOKEN_1);
-        router.addLiquidity(address(FRAX), address(FLOW), false, TOKEN_1, TOKEN_1, 0, 0, address(owner), block.timestamp);
-        address pair1 = router.pairFor(address(FRAX), address(FLOW), false);
-        address pair2 = router.pairFor(address(DAI), address(FLOW), false);
-        uint pool_length = voter.length();
-        console.log("Total pool gauge created:", pool_length); //should remain 0 below comment
-
-        address new_gauge = voter.createGauge(pair2, 0); // create second gauges
-      
-        assertEq(minter.weekly_emission(), 2000e18);
-        uint pool_length2 = voter.length();
-        console.log("Create new gauge. Total pool gauge created: ", pool_length2); //should remain 0 below comment
-
-        uint activeGaugeNumber1 = voter.activeGaugeNumber();
-
-        console.log("Didn't call vote, Active Gauge: ", activeGaugeNumber1);
-
-        _elapseOneWeek();
-
-        address[] memory pools = new address[](2);
-        pools[0] = pair1; // vote on first gauge
-        pools[1] = pair2;// vote on second gauge
-        uint256[] memory weights = new uint256[](2);
-        weights[0] = 9899;
-        weights[1] = 101;
-
-        // SECOND VOTE EMISSION TO POOLS [first vote is in deployBase()]
-        voter.vote(1, pools, weights);
-
-        // Variables for new gauge
-
-        // Variables for old Gauge
-        address[][] memory old_reward_tokens = new address[][](1);
-        address[] memory old_token = new address[](1); // used for reward_tokens
-        address[] memory oldGaugeArray = new address[](1);
-        address[] memory newGaugeArray = new address[](1);
-
-        // mapping(address => address) public gauges; // pool => gauge
-        address get_oldGauge = voter.gauges(pair1); // FRAX/FLOW
-        oldGaugeArray[0] = address(get_oldGauge);// FRAX/FLOW gauge
-        old_token[0] = address(FLOW); //reward token
-        old_reward_tokens[0] = old_token;
-        
-        newGaugeArray[0] = address(new_gauge); // DAI/FLOW Gauge
-
-        
-        uint activeGaugeNumber2 = voter.activeGaugeNumber(); // 0
-
-        console.log("After first vote and before claiming rewards, Active Gauge: ", activeGaugeNumber2);
-
-        _elapseOneWeek();
-        
-        GaugeV4 gauge_instance = GaugeV4(new_gauge);
-        voter.distribute();
-
-        voter.claimRewards(oldGaugeArray,old_reward_tokens); // rewards claimed 1
-        voter.claimRewards(newGaugeArray,old_reward_tokens); // rewards claimed 1
-
-        uint activeGaugeNumber3= voter.activeGaugeNumber();
-        assertEq(minter.weekly_emission(), 4000e18); //should return 4000e18 instead of 2000e18 because of 2 active gauges.
-
-        console.log("After first vote and after claiming rewards, Active Gauge:", activeGaugeNumber3);
-
-        // Main problem, another week later
-        _elapseOneWeek();
-        
-        voter.distribute();
-
-        voter.pauseGauge(new_gauge);
-
-        //@audit still able to claim more rewards for both gauges
-        voter.claimRewards(oldGaugeArray,old_reward_tokens); // rewards claimed 
-        voter.claimRewards(newGaugeArray,old_reward_tokens); // rewards claimed 
-
-        uint activeGaugeNumber4= voter.activeGaugeNumber();
-
-        //@audit-issue
-        assertEq(minter.weekly_emission(), 4000e18); //should return 2000e18 instead of 4000e18 because the other gauge is paused
-
-        console.log("After paused: Active Gauge: ", activeGaugeNumber4);
-    }
-    function _elapseOneWeek() private {
-        vm.warp(block.timestamp + ONE_WEEK);
-        vm.roll(block.number + 1);
-    }
-}
-```
-</p>
-</details> 
-
-
-## Impact
-Unfair amounts of rewards are sent to users from different gauges.
-
-## Code Snippet
-https://github.com/sherlock-audit/2024-06-velocimeter/blob/63818925987a5115a80eff4bd12578146a844cfd/v4-contracts/contracts/Voter.sol#L549C1-L562C6
-
-https://github.com/sherlock-audit/2024-06-velocimeter/blob/63818925987a5115a80eff4bd12578146a844cfd/v4-contracts/contracts/Minter.sol#L112C1-L137C6
-
-https://github.com/sherlock-audit/2024-06-velocimeter/blob/63818925987a5115a80eff4bd12578146a844cfd/v4-contracts/contracts/Voter.sol#L407C1-L429C6
-
-https://github.com/sherlock-audit/2024-06-velocimeter/blob/63818925987a5115a80eff4bd12578146a844cfd/v4-contracts/contracts/Voter.sol#L380-L392C6
-## Tool used
-
-Manual Review
-
-## Recommendation
-```diff
-    function pauseGauge(address _gauge) external {
-        if (msg.sender != emergencyCouncil) {
-            require(
-                IGaugePlugin(gaugePlugin).checkGaugePauseAllowance(msg.sender, _gauge)
-            , "Pause gauge not allowed");
-        }
-        require(isAlive[_gauge], "gauge already dead");
-        isAlive[_gauge] = false;
-        claimable[_gauge] = 0;
-+       activeGaugeNumber -= 1;
-        address _pair = IGauge(_gauge).stake(); // TODO: add test cases
-        try IPair(_pair).setHasGauge(false) {} catch {}
-        emit GaugePaused(_gauge);
-
-    function killGaugeTotally(address _gauge) external {
-        if (msg.sender != emergencyCouncil) {
-            require(
-                IGaugePlugin(gaugePlugin).checkGaugeKillAllowance(msg.sender, _gauge)
-            , "Restart gauge not allowed");
-        }
-        require(isAlive[_gauge], "gauge already dead");
-        address _pool = poolForGauge[_gauge];
-        delete isAlive[_gauge];
-        delete external_bribes[_gauge];
-        delete poolForGauge[_gauge];
-        delete isGauge[_gauge];
-        delete claimable[_gauge];
-        delete supplyIndex[_gauge];
-        delete gauges[_pool];
-        try IPair(_pool).setHasGauge(false) {} catch {}
-        killedGauges.push(_gauge);
-+       activeGaugeNumber -= 1;
-        emit GaugeKilledTotally(_gauge);
-    }
-```
-
 
 
 ## Discussion
-
-**nevillehuang**
-
-request poc
-
-Likely invalid, the paused/killed gauge still met the quota, likely design decision. The killed/paused gauge does not receive rewards anyways. 
-
-**sherlock-admin4**
-
-PoC requested from @goheesheng
-
-Requests remaining: **29**
-
-**goheesheng**
-
-Hi @nevillehuang, the runnable PoC has been provided above
-
-**goheesheng**
-
-run `forge test --match-test testPoCPause_weeklyEmission -vv`, forgot to change the function name
-
-**nevillehuang**
-
-I will leave this open for escalation given I confirmed with sponsor it is inconsistent behavior and I believe the loss here would be the rewards that admin notified that was supposed to be delegated to the blacklisted/killed gauge but was instead distributed to the active gauges instead i.e. users earn more than intended rewards
-
-# Issue M-11: User will lose all their unclaimed rewards once their lock expires 
-
-Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/649 
-
-## Found by 
-4gontuk, AMOW, Audinarey, Ch\_301, bughuntoor, eeshenggoh, eeyore
-## Summary
-User will lose all their unclaimed rewards once their lock expires
-
-## Vulnerability Detail
-Let's look at the code of `_claim` within `RewardsDistributorV2`
-
-```solidity
-        for (uint i = 0; i < 50; i++) {
-            if (week_cursor >= _last_token_time) break;
-
-            if (week_cursor >= user_point.ts && user_epoch <= max_user_epoch) {
-                user_epoch += 1;
-                old_user_point = user_point;
-                if (user_epoch > max_user_epoch) {
-                    user_point = IVotingEscrow.Point(0,0,0,0);
-                } else {
-                    user_point = IVotingEscrow(ve).user_point_history(_tokenId, user_epoch);
-                }
-            } else {
-                int128 dt = int128(int256(week_cursor - old_user_point.ts));
-                uint balance_of = Math.max(uint(int256(old_user_point.bias - dt * old_user_point.slope)), 0);
-                if (balance_of == 0 && user_epoch > max_user_epoch) break;
-                if (balance_of != 0) {
-                    to_distribute += balance_of * tokens_per_week[week_cursor] / ve_supply[week_cursor];
-                }
-                week_cursor += WEEK;
-            }
-        }
-```
-
-As we can see, it gets the latest point prior to the week to check against and based on the slope and bias calculates the reward. However, let's look at the case where the user's lock would have expired at the checkpoint we're looking against.
-```solidity
-                int128 dt = int128(int256(week_cursor - old_user_point.ts));
-                uint balance_of = Math.max(uint(int256(old_user_point.bias - dt * old_user_point.slope)), 0);
-```
-
-As the lock would have expired, `old_user_point.bias - dt * old_user_point.slope` would return value less than 0. Keep in mind that the value is first wrapped in uint256 and then `Math.max` is performed.
-
-So in the situation where the calculated bias would be `-1e18`, it would first be turned into `uint256.max - 1e18` and then the higher of it and 0 would be assigned to `balance_of`, which would basically mean the user's balance will be just a little under `uint256.max`
-
-Which would then on the next line overflow and revert.
-
-```solidity
-                if (balance_of != 0) {
-                    to_distribute += balance_of * tokens_per_week[week_cursor] / ve_supply[week_cursor];
-                }
-```
-
-Meaning that if a user has had unclaimed rewards up to the point where their lock has expired, they'll remain permanently locked.
-
-Note: same issue appears on 4 instances within the contract, this is simply the highest impact that could be done. 
-
-## Impact
-Loss of funds
-
-## Code Snippet
-https://github.com/sherlock-audit/2024-06-velocimeter/blob/main/v4-contracts/contracts/RewardsDistributorV2.sol#L265
-
-## Tool used
-
-Manual Review
-
-## Recommendation
-First check which is the higher number and then turn it into `uint256`
-
-
-
-## Discussion
-
-**nevillehuang**
-
-Note, I will make a self escalation to avoid a long drawn out escalation on multiple different issues. For any issues relating to duplicates of this issue, please leave comments here so we can aggregate comments and reconsider validity.
-
-In my opinion, only the following issues mentioned the expiry precondition to that results in the unsafe casting leading to users not being able to claim rewards:
-
-- #140
-- #533
-- #649
-- #654
-
-In my opinion, the following issues does not mention the expiry precondition but implies it, so arguably valid and I will leave valid duplicates and open for escalation disputes:
-- #78 
-- #299
-- #417
-
-In my opinion, the following does not mention or imply the expiry precondition and/or lack concrete numerical examples/PoCs, or mentioned only third party protocol impact, which is OOS
-- #88 (Did not mention expiry precondition, no example numerical/coded PoC)
-- #96 (Did not mention expiry precondition, no example numerical/coded PoC)
-- #166 (Did not mention expiry precondition, no example numerical/coded PoC, mentions OOS third party integration and future upgrades)
-- #169 (Did not mention expiry precondition, no example numerical/coded PoC, mentions OOS third party integration and future upgrade)
-- #195 (Did not mention expiry precondition, no example numerical/coded PoC, mentions OOS third party integration and future upgrade)
-- #249 (Did not mention expiry precondition, no example numerical/coded PoC, mentions OOS third party integration and future upgrade)
-- #281 (Did not mention expiry precondition, no example numerical/coded PoC)
-- #322 (Good example, but did not mention expiry precondition)
-- #332 (The described impact is wrong for this issue)
-- #337 (Did not mention expiry precondition, no example numerical/coded PoC, mentions OOS third party integration and future upgrade)
-- #386 (good example, but no protocol specific impact described. This is essentially stating an issue but not stating how it will impact the protocol
-)
-- #392 (Did not mention expiry precondition, no example numerical/coded PoC)
-- #400 (Did not mention expiry precondition, no example numerical/coded PoC, mentions OOS third party integration and future upgrade)
-- #433 (No impact described)
-- #476 (Good example, but did not mention expiry precondition)
-- #503 (Did not mention expiry precondition, no example numerical/coded PoC, mentions OOS third party integration and future upgrade)
-- #527 (Did not mention expiry precondition, no example numerical/coded PoC)
-- #578 (Did not mention expiry precondition, no example numerical/coded PoC, mentions OOS third party integration and future upgrade)
-- #594 (Good example, but did not mention expiry precondition)
-- #596 (Did not mention expiry precondition, no example numerical/coded PoC)
-- #617 (Did not mention expiry precondition, no example numerical/coded PoC, mentions OOS third party integration and future upgrade)
-- #635 (Did not mention expiry precondition, no example numerical/coded PoC, mentions OOS third party integration and future upgrade)
-- #652 (Did not mention expiry precondition, no example numerical/coded PoC, no clear impact mentioned)
-- #653 (Did not mention expiry precondition, no example numerical/coded PoC)
-
 
 **sherlock-admin2**
 
 The protocol team fixed this issue in the following PRs/commits:
-https://github.com/Velocimeter/v4-contracts/pull/17
+https://github.com/Velocimeter/v4-contracts/pull/19
 
 
-# Issue M-12: The circulating_supply() of the Minter contract may revert, resulting in the inability of the Minter to periodically emit Flow tokens 
+# Issue M-9: The circulating_supply() of the Minter contract may revert, resulting in the inability of the Minter to periodically emit Flow tokens 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/663 
 
