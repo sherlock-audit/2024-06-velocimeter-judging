@@ -106,6 +106,10 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/9
 
 
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
+
 # Issue H-2: VotingEscrow MAX_DELEGATES value can lead to DOS on certain EVM-compatible chains 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/26 
@@ -200,6 +204,14 @@ Reducing the `MAX_DELEGATES` value to 256 would reduce the cost of the outlined 
 The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/14
 
+
+**spacegliderrrr**
+
+Fix looks good. `MAX_DELEGATES` value is now 50.
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
 
 # Issue H-3: poke() may be dos 
 
@@ -379,6 +391,14 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/21
 
 
+**spacegliderrrr**
+
+Fix looks good. Function now does not revert on 0 vote, but instead continues with the loop.
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
+
 # Issue H-4: pause or kill gauge can lead to FLOW token stuck in voter 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/107 
@@ -516,6 +536,14 @@ If `_claimable > 0` send reward token back to minter
 The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/13
 
+
+**spacegliderrrr**
+
+Fix looks good.
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
 
 # Issue H-5: `OptionTokenV4.exerciseLP`'s `addLiquidity` lack of slippage can be abused to make victims exercise for a lower liquidity than intended 
 
@@ -896,6 +924,14 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/27
 
 
+**spacegliderrrr**
+
+Fix looks good. Slippage protection is now properly applied.
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
+
 # Issue H-6: If user merges their `veNFT`, they'll lose part of their rewards 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/235 
@@ -1032,6 +1068,14 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/24
 
 
+**spacegliderrrr**
+
+Fix looks good. Upon burning a token, the last owner is saved in mapping, which later the `RewardsDistributor` and `Bribe` check.
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
+
 # Issue H-7: Exercising a large amount of options gives significantly higher discounts than supposed to. 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/238 
@@ -1093,6 +1137,10 @@ Do not use `amountsOut` as a way to price the options
 The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/22
 
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
 
 # Issue H-8: voters cannot disable max lock 
 
@@ -1232,6 +1280,14 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/12
 
 
+**spacegliderrrr**
+
+Fix looks good. `disable_max_lock` now works properly.
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
+
 # Issue H-9: `ve_supply` is updated incorrectly 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/495 
@@ -1338,6 +1394,14 @@ Make sure that `ve_supply[t]` should be only updated when `t` week has end (`t +
 The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/11
 
+
+**spacegliderrrr**
+
+Fix looks good. `>` is now changed to `>=`
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
 
 # Issue M-1: First liquidity provider of a newly created stable pair can cause DOS and loss of funds 
 
@@ -1540,6 +1604,14 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/25
 
 
+**spacegliderrrr**
+
+Fix looks good. 
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
+
 # Issue M-2: swap may be reverted if the input amount is not large enough, especially for low decimal tokens 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/52 
@@ -1633,6 +1705,14 @@ If the calculated fee is 0, do not need to send fees to the `externalBribe`
 The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/26
 
+
+**spacegliderrrr**
+
+Fix looks good. Contract now checks if `amount > 0` before calling `notifyRewardAmount`
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
 
 # Issue M-3: `update_period(..)` leads to wrong calculation in weekly emissions breaking accounting for the protocol 
 
@@ -1740,6 +1820,14 @@ File: Minter.sol
 The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/16
 
+
+**spacegliderrrr**
+
+Fix looks good. Team rate is now calculated correctly.
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
 
 # Issue M-4: Voting power does not decay when calculating shares of flow emissions if the user does not vote again. 
 
@@ -2372,6 +2460,10 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/21
 
 
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
+
 # Issue M-5: User can make their `veNFT` unpokeable by voting for a to-be-killed gauge 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/208 
@@ -2416,6 +2508,14 @@ If gauge is killed, instead of reverting, `continue`
 The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/21
 
+
+**spacegliderrrr**
+
+Fix looks good. Function now does not revert in case the gauge is killed.
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
 
 # Issue M-6: Rewards supplied to a gauge, prior to its first depositor will be permanently lost. 
 
@@ -2504,7 +2604,15 @@ Also, for a detailed answer on Kwenta, look at the discussion under issue 94 whe
 
 Hence, I agree it should remain as it is in the context of Velocimeter.
 
-# Issue M-7: Incorrect calculation of TWAP in `OptionTokenV4.getTimeWeightedAveragePrice()` function. 
+**spacegliderrrr**
+
+Fix looks good. `notifyRewardAmount` now checks that `totalSupply > 0`
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
+
+# Issue M-7: Incorrect calculation of TWAP in OptionTokenV4.getTimeWeightedAveragePrice() function. 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/298 
 
@@ -2649,6 +2757,14 @@ The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/22
 
 
+**spacegliderrrr**
+
+Fix looks good. `TWAP` now includes current prices too. 
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
+
 # Issue M-8: `Voter.replaceFactory()` and `Voter.addFactory()` functions are broken. 
 
 Source: https://github.com/sherlock-audit/2024-06-velocimeter-judging/issues/301 
@@ -2704,6 +2820,15 @@ Manual Review
 The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/19
 
+
+**spacegliderrrr**
+
+Fix looks good. 
+
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
 
 # Issue M-9: The circulating_supply() of the Minter contract may revert, resulting in the inability of the Minter to periodically emit Flow tokens 
 
@@ -2794,4 +2919,12 @@ Requests remaining: **19**
 The protocol team fixed this issue in the following PRs/commits:
 https://github.com/Velocimeter/v4-contracts/pull/15
 
+
+**spacegliderrrr**
+
+Fix looks good. `circulating_supply` now simply returns the total supply of Flow
+
+**sherlock-admin2**
+
+The Lead Senior Watson signed off on the fix.
 
